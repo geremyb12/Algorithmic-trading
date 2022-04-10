@@ -1,0 +1,600 @@
+---
+title: "Algorithmic Trading"
+author: "Francis Sunny & Geremy Bantug"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r 1. setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(quantmod)
+library(gramEvol)
+library(GA)
+library(TTR)
+library (knitr)
+library (RColorBrewer)
+
+coul <- brewer.pal(5, 'Set2')
+stock <- 'NFLX'
+fromDate <- '2019-01-01'
+toDate <- '2021-01-01'
+cashInHand <- 10000
+windowSize <- 10
+testTrainSplit <- .20
+predictionWindow <- 60
+predictionDate <- index(get(getSymbols(stock, src="yahoo", from=toDate, freq="daily", to=format(as.Date(toDate)+as.difftime(predictionWindow,unit='days')))))
+predictionWindow <- length(predictionDate)
+options("getSymbols.warning4.0"=FALSE)
+
+```
+
+# Background of the Approach
+
+Algorithmic Trading is the approach by which, trading of stocks is executed with predefined set of rules or rules generated using sophisticated algorithms. The approach here is to make use of the evolutionary techniques such as Genetic Programming to predict the price of a stock and then with the help of several technical indicators like moving averages and relative strength indices to generate trading rules in such a way to maximise the profit over a period. Also genetic algorithm is applied to optimise the parameters of the technical indicators.
+
+The approach used here uses a sliding window approach and Grammatical Evolution to generate a formula that fits the trend of the stock and using the same formula to predict the future values of the stock. The stock values will be predicted for a certain period and used to apply the trading rules implemented using the technical indicators such as Moving Averages, RSI and MACD.These trading rules will be applied to generate signals that indicate when to buy and sell stock.
+
+The literature "System for foreign exchange trading using genetic algorithms and reinforcement learning" 2007 by A. Hryshko & T. Downs
+employs a similar trading strategy to the one explored in this report. This literature focuses on employing machine and reinforcement learning along with technical analysis with optimisation of technical trading rules through genetic algorithms. Instead of approximating future trades using genetic programming, the literature focuses on technical analysis to make these predictions.
+
+\newpage
+# Dataset Chosen
+
+The stock selected for analysis is: `r stock`.
+
+Period for which preliminary analysis done is from `r fromDate` to `r toDate`
+
+
+```{r 2 Dataset, echo=FALSE, eval= TRUE, fig.dim=c(8,4)}
+# Read Data
+stockDataSet <- get(getSymbols(stock, src="yahoo", from=fromDate, to=toDate, freq="daily"))
+dataOpen <- stockDataSet$NFLX.Open
+dataClose <- stockDataSet$NFLX.Close
+chartSeries(stockDataSet)
+```
+
+
+The Netflix (NFLX) stock was chosen as the dataset for this experiment as it has a general upwards trend and the reason for only choosing one stock is to decrease the run time. However, this strategy could be applied to a portfolio instead of focusing on one stock which could be explored in future work. The data range was chosen so that there is plenty data from which the GrammaticalEvolution function can use to test and train that captures the general trend of the stock.
+
+# Trading Strategy
+
+The approach designed here is to find the estimated profit that can be made on a single stock (`r stock`) by predicting the future prices of the stock data up-to a particular number of days. Strategy here is purely based on technical analysis of the few of the technical indicators. In an ideal scenario this technical analysis should be combined with further fundamental analysis on the stock and market conditions to make proper predictions and building the trading rules. 
+
+The strategy designed here could be further improved by combining using other technical indicators, combing the signals from different technical indicators, splitting the capital available to different strategies and combining the signals to include more trades and get more profit. Instead of making such complex rules, approach taken here just finds the rule which gives max profit and apply that for the prediction period. After which, the model can be retrained to predict the next set of predictions.
+
+Since this approach is only dealing with one single stock, it only considers buying the maximum number of stocks that can be bought with amount in hand and selling the same number of stocks. It doesn't consider buying again in between this buy and sell period.
+
+## Block Diagram of Trading Strategy
+
+```{r 3. Block Diagram, out.width = "500px", out.height="300px", fig.align='center', eval=TRUE, echo=FALSE}
+knitr::include_graphics("bdiagram.png")
+```
+
+## Prediction of Future Data
+
+```{r 4. Predict, include=FALSE}
+dataPrediction <- function(data){
+  # Converting to DataFrame by lagging the dataset for prediction. 
+  # Also, removing NA values
+  stocksData <- data.frame(Lag(data,seq(from=windowSize,to=1)), 
+                           data)[(windowSize+1):nrow(data),]
+  
+  colNames <- c()
+  for (i in 1:windowSize){
+    colNames[i] <- paste('x', i, sep='') 
+  }
+  colNames <- colNames[windowSize:1]
+  colNames[i+1] <- 'x'
+  names(stocksData) <- colNames
+  
+  # split test and train data
+  train <- head(stocksData, floor(nrow(stocksData)*(1-testTrainSplit)))
+  test <- tail(stocksData, ceiling(nrow(stocksData)*testTrainSplit))
+  
+  # Generate Rule for expression
+  rules <- list(expr = grule(op(expr, expr), func(expr), var),
+                func = grule(sin, cos, exp, log, sqrt),
+                op = grule('+', '-', '*', '/', '^'),
+                var = grule(mydata$x10, mydata$x9, mydata$x8, mydata$x7, mydata$x6, mydata$x5, mydata$x4, mydata$x3, 
+                            mydata$x2, mydata$x1),
+                rn = gvrule(seq(-10,10,0.1))
+  )
+  
+  ruleGrammar <- CreateGrammar(rules)
+  
+  # fitness function for calculating best expression
+  fitnessFunction <- function(expr) {
+    result <- eval(expr)
+    if (any(is.nan(result)) || any(is.na(result)))
+      return(Inf)
+    return (sqrt(mean((mydata$x - result)^2)))
+  }
+  
+  # Training using GE
+  mydata <- train
+  ge <- GrammaticalEvolution(ruleGrammar, fitnessFunction,
+                             terminationCost = 0.05, max.depth = 5)
+  predictions <- eval(ge$best$expressions)
+  # Testing using GE
+  mydata <- test
+  predictions <- eval(ge$best$expressions)
+  mydata <- cbind(mydata, predictions)
+  # Next n days predictions
+  mydata <- tail(mydata,1)[,c(1:windowSize)]
+  variety_predictions <- c()
+  for(i in 1:predictionWindow){
+    variety_predictions[i] <- eval(ge$best$expressions)
+    for (j in (windowSize:2)){
+      mydata[j]<-mydata[j-1]
+    }
+    mydata[1] <- variety_predictions[i]
+  }
+  return (variety_predictions)
+}
+
+predictions <- data.frame(dataPrediction(dataOpen),
+                          dataPrediction(dataClose))
+predictions <- xts(predictions, order.by =predictionDate)
+colnames(predictions) <- c('Open', 'Close')
+dataWithPrediction <- rbind(NFLX[,c(1,4)],predictions)
+```
+
+In this section the prediction of future data is explored through an implementation of genetic programming using the R library gramEvol and a function called GrammaticalEvolution. The prediction is done through a sliding window approach, where a window size of 10 is used to lag the input data. With this lag of data for date ranges previously selected when gathering the data, is then split into test and train samples in which the GrammaticalEvolution function can learn the data and identify an approximate expression that fits the trend of the data. To build the expression another functionality of gramEvol is used, to state the parameters of the rules which is called CreateGrammar. These parameters include constants, variables, operands and functions which can be used to build the expression that fits the trend of the data. The variables used for creating the grammar is the lag data generated from the window sizes. 
+
+With the rules created using CreateGrammar, evaluate the expression generated and find its fitness through RMSE which is the fitness function. On iterating through the search space for possible expressions GrammaticalEvolution helps to identify the best expression with minimum cost. 
+
+Once the best expression is found, the next step is to predict the future trade data. For this approach only the Open and Close prices of the day are required.
+
+```{r 5. Buy and Sell, include=FALSE}
+
+#buy and sell function where input x are the signals
+buy_sell <- function(x){
+  # Setting a flag for buy and sell status
+  buyEnable <- 1
+  sellEnable <- 0
+  x$priceInhand<-cashInHand
+  stocksBought <- 0
+  # looping through each row of dataframe using the buy and sell status so that 
+  # 1. 1st action will always be buy
+  # 2. If a buy flag is set it wont buy again unless a sell signal is received 
+  #    and vice-versa
+  # 3. 1 will be buy, -1 will be sell, 0 will be hold
+  for (i in 1:nrow(x)){
+    if (x$signal[i]==1 & buyEnable == 1 & sellEnable == 0){
+      buyEnable <- 0
+      sellEnable <- 1
+      
+      if (is.na(x$Open[i+1])){
+        x$priceInhand[i:nrow(x)] <- x$priceInhand[i]
+      }
+      else{
+        stocksBought <- x$priceInhand[i]%/%x$Open[i+1]
+        x$priceInhand[i:nrow(x)] <- cashInHand%%x$Open[i+1]
+      }
+    }
+    else if (x$signal[i]==-1 & sellEnable == 1 & buyEnable==0){
+      buyEnable <- 1
+      sellEnable <- 0
+      if (is.na(x$Open[i+1])){
+        x$priceInhand[i:nrow(x)] <- x$priceInhand[i]
+      }
+      else{
+        x$priceInhand[i:nrow(x)] <- x$priceInhand[i]+(stocksBought * x$Open[i+1])
+      }
+    }
+    else{
+      x$signal[i] <- 0
+    }
+  }
+  return(x)
+}
+```
+
+# Technical Indicators
+
+## SMA Crossover
+
+
+```{r 6. SMA chartseries, echo=FALSE, eval=TRUE, include=FALSE}
+chartSeries(dataWithPrediction$NFLX.Close)
+addSMA(n=20, on=1, col='blue')
+```
+```{r 6.1 SMA Characteristics Continued, echo=FALSE, eval=TRUE, include=TRUE}
+addSMA(n=50, on=1,col='red')
+```
+
+To identify when to buy or sell stock technical indicators such as SMA Crossover, RSI and MACD were implemented and were optimised using genetic algorithm with the R library GA. To obtain signals for SMA Crossover an SMA function was used from the R library TTR, in which the two parameters considered where the windows for the short and long SMA of the combined initial train data and predicted closing price values. This is so that the SMA can fully capture the general trend of the stock and consider the predicted future data. A buy signal is generated when the short SMA crosses above the long SMA and a sell signal is generated when the short SMA crosses below the long SMA.
+
+The graph explains the SMA with a short moving average of 20, represented with blue line, and long moving average of 50 represented in red line. In the approach here these short and long values may not be used to generate signals and execute the trades, but instead these values would be replaced with the optimal parameters obtained from the GA optimiser designed.
+
+```{r 7. SMA signals, include=FALSE}
+smaTradeRule <- function(low, high){
+  indicatorLow <-SMA(dataWithPrediction$NFLX.Close,n=low)
+  indicatorHigh <-SMA(dataWithPrediction$NFLX.Close,n=high)
+  tradeData <- tail(data.frame(indicatorLow, indicatorHigh, 
+                               dataWithPrediction$NFLX.Open, 
+                               dataWithPrediction$NFLX.Close), 
+                    predictionWindow)
+  colnames(tradeData) <- c("Low","High","Open","Close")
+  tradeData$signal <- ifelse(tradeData$Low>tradeData$High, 1,
+                             ifelse(tradeData$Low<tradeData$High,-1, 0))
+  smaTrade <<- buy_sell(tradeData)
+  return (tail(smaTrade$priceInhand,1))
+}
+```
+
+## Executing Trade With Optimal Parameters for SMA
+
+To optimize the values of long and short moving averages, GA is utilised to identify these parameters which generates maximum profit from the range of trades in the predicted data. The GA is designed to iterate through a low and upper bounds for each short and long moving average in the range of values from 2 to 100 and take the best combination from these values. The upper bound was selected as 100 because this approach uses only a small prediction window.
+
+The best values from the range of upper and lower bounds are determined by the fitness function designed. The fitness function is designed to maximise the profit obtained for each set of SMA signals and minimising the fitness whenever an unlikely condition arises. Unlikely conditions identified the fitness function are: 
+
+1. Short moving average greater than long moving average.
+2. Difference between long and short less than a value of 10. Or else the two moving averages would be very close to each other.
+3. Profit is less than 0 or a null value or previous profit value.
+
+```{r 8. SMA GA Fitnessfunc, include=FALSE}
+smaFitness <- function(parameters){
+  parameters <- floor(parameters)
+  if (parameters[1] >= parameters[2]){
+    return(-Inf)
+  }
+  if (parameters[2] - parameters[1] <10){
+    return(-Inf)
+  }
+  newProfit <- smaTradeRule(parameters[1], parameters[2]) - cashInHand
+  if (newProfit<=0 | is.null(newProfit)){
+    return(-Inf)
+  }
+  if (newProfit> profit){
+    profit <- newProfit
+    return(profit)
+  }
+  else{
+    return(-Inf)
+  }
+}
+```
+
+```{r 9. SMA Trade Execution, include=FALSE}
+profit <- 0
+GAParametersSMA <- ga(type = 'real-valued', fitness = smaFitness,
+                      lower = c(2,2), upper = c(100,100), monitor=FALSE)
+smaParameters <- floor(GAParametersSMA@solution)[1,]
+smaProfit <- GAParametersSMA@fitnessValue
+```
+
+Optimal Parameters for short and long SMAs: `r smaParameters[1]`, `r smaParameters[2]`.
+
+Profit from SMA Crossover Trading Rule: `r smaProfit`
+
+## Relative Strength Index (RSI)
+
+To generate the RSI values a similar approach to the SMA Crossover is implemented but with the use of the RSI function of the TTR library. As a rule it is good to buy stock when RSI is less than 30 and sell when greater than 70 [source]. 
+
+```{r 10. RSI signals, include=FALSE}
+rsiTradeRule <- function(low, high, days){
+  indicator <- RSI(dataWithPrediction$NFLX.Close,n=days)
+  rsi <- tail(data.frame(indicator, dataWithPrediction$NFLX.Close, 
+                    dataWithPrediction$NFLX.Open),predictionWindow) 
+  colnames(rsi) <- c("RSI", "Close", "Open")
+  rsi$signal <- 0
+  rsi$signal <- ifelse(rsi$RSI<low, 1,
+                       ifelse(rsi$RSI>high,-1, 0))
+  rsiTrade <<- buy_sell(rsi)
+  return (tail(rsiTrade$priceInhand,1))
+}
+```
+
+## Executing Trade With Optimal Parameters for RSI
+
+To optimize the low and high RSI values and window of days, a similar GA previously designed, is utilised to identify these parameters which generates maximum profit from the range of trades in the predicted data.
+
+The best values from the range of upper and lower bounds are determined by the fitness function designed. The fitness function is designed to maximise the profit obtained for each set of RSI signals and minimising the fitness whenever an unlikely condition arises. Unlikely conditions identified the fitness function are: 
+
+1. Low RSI greater than high RSI.
+2. Difference between low and high RSIs less than a value of 10. Or else, the two signals would be very close to each other.
+3. Profit is less than 0 or a null value or previous profit value.
+
+```{r 11. RSI GA Fitnessfunc, include=FALSE}
+rsiFitness <- function(parameters){
+  parameters <- floor(parameters)
+  if (parameters[1] >= parameters[2]){
+    return(-Inf)
+  }
+  if (parameters[2] - parameters[1] <10){
+    return(-Inf)
+  }
+  newProfit <- rsiTradeRule(parameters[1], parameters[2], parameters[3]) - cashInHand
+  if (is.null(newProfit)){
+    return(-Inf)
+  }
+  else if (newProfit<=0|is.null(newProfit)){
+    return(-Inf)
+  }
+  if (newProfit> profit){
+    profit <- newProfit
+    return(profit)
+  }
+  else{
+    return(-Inf)
+  }
+}
+```
+
+```{r 12. RSI GA, include=FALSE}
+profit <- 0
+GAParametersRSI <- ga(type = 'real-valued', fitness = rsiFitness,
+                      lower = c(2,2,2), upper = c(100,100,100), monitor=FALSE)
+rsiParameters <- floor(GAParametersRSI@solution)[1,]
+rsiProfit <- GAParametersRSI@fitnessValue
+```
+
+Optimal Parameters for low and high RSIs: `r rsiParameters[1]`, `r rsiParameters[2]`.
+
+Optimal Parameter for window size: `r rsiParameters[3]`.
+
+Profit from RSI Trading Rule: `r rsiProfit`
+
+## Moving Average Convergence Divergence (MACD)
+
+The MACD implementation also follows a similar approach to both RSI and SMA Crossover with the use of the MACD function of the TTR library. MACD signals is gathered from the crossover of EMA and SMA trend lines. MACD implemented using the TTR library uses SMA to calculate long moving average, EMA to calculate short moving average and signal is calculated using exponential smoothed line [source].https://bookdown.org/kochiuyu/technical-analysis-with-r-second-edition/macd.html
+
+```{r 13. MACD signals, include=FALSE}
+macdTradeRule <- function(low, high, signal){
+  indicator <- MACD(dataWithPrediction$NFLX.Close, nFast=high, nSlow=low,
+                    nSig=signal, percent=FALSE)
+  macd <- tail(data.frame(indicator, dataWithPrediction$NFLX.Close,
+                          dataWithPrediction$NFLX.Open),
+               predictionWindow)
+  colnames(macd) <- c('macd', 'signal_', 'Close', 'Open')
+  macd$signal <- 0
+  macd$signal <- ifelse(macd$macd<macd$signal_, 1,
+                        ifelse(macd$macd>macd$signal_,-1, 0))
+  macdTrade <<- buy_sell(macd)
+  return (tail(macdTrade$priceInhand,1))
+}
+```
+
+## Executing Trade With Optimal Parameters for MACD
+
+To optimize the long and short moving averages and signal values, a similar GA previously designed is utilised to identify these parameters which generates maximum profit from the range of trades in the predicted data.
+
+The best values from the range of upper and lower bounds are determined by the fitness function designed. The fitness function is designed to maximise the profit obtained for each set of MACD parameters and minimising the fitness whenever an unlikely condition arises. Unlikely conditions identified the fitness function are: 
+
+1. Short EMA greater than long SMA.
+2. Difference between short and long MAs less than a value of 10. Or else, the two parameters would be very close to each other.
+3. Profit is less than 0 or a null value or previous profit value.
+
+```{r 14. MACD GA Fitnessfunc, include=FALSE}
+macdFitness <- function(parameters){
+  parameters <- floor(parameters)
+  if (parameters[1] >= parameters[2]){
+    return(-Inf)
+  }
+  if (parameters[2] - parameters[1] <10){
+    return(-Inf)
+  }
+  newProfit <- rsiTradeRule(parameters[1], parameters[2], parameters[3]) - cashInHand
+  if (newProfit<=0| is.null(newProfit)){
+    return(-Inf)
+  }
+  if (newProfit> profit){
+    profit <- newProfit
+    return(profit)
+  }
+  else{
+    return(-Inf)
+  }
+}
+```
+
+```{r 15. MACD GA, include=FALSE}
+profit <- 0
+GAParametersMACD <- ga(type = 'real-valued', fitness = macdFitness,
+                      lower = c(2,2,2), upper = c(100,100,100), monitor=FALSE)
+macdParameters <- floor(GAParametersMACD@solution)[1,]
+macdProfit <- GAParametersMACD@fitnessValue
+```
+
+Optimal Parameters for short EMA and long SMA: `r macdParameters[1]`, `r macdParameters[2]`.
+
+Optimal Parameter for exponential smoothed : `r macdParameters[3]`.
+
+Profit from MACD Trading Rule: `r macdProfit`
+
+# Performance Evaluation
+
+## Buy and Sell Function
+
+Once the signals have been generated from the technical indicators, they are then passed into a function as an data frame input consisting of signals, predicted closing and opening prices. The holding signals for the position taken is generated inside this function. This holding signal is then used for executing the trade ie. Buying and selling of the stock. This approach assumes to have a capital of $10000 at the beginning. The indicators used here are built using the closing price of the training stock data, so the buy and sell function uses these signals to buy and sell the maximum number of stock possible at the next opening price of each signal.
+
+## Comparison of Technical Indicator Rules
+```{r 16. Comparison of trading rules, echo=FALSE, eval=TRUE}
+smaProfit <- smaTradeRule(smaParameters[1],smaParameters[2])
+rsiProfit <- rsiTradeRule(rsiParameters[1],rsiParameters[2],rsiParameters[3])
+macdProfit <- macdTradeRule(macdParameters[1], macdParameters[2], macdParameters[3])
+profits <- data.frame(smaProfit, rsiProfit, macdProfit)
+colnames(profits) <- c('SMA', 'RSI', 'MACD')
+barplot(c(t(profits[1,])) - cashInHand, col=coul,
+        names.arg = colnames(profits),
+        xlab = 'Trading Rule',
+        cex.names = 1,
+        ylab = 'Profit',
+        main = 'Profits Of Strategies')
+maxIndex <- which.max(profits[1,])
+```
+
+Barplot indicates that the technical trading indicator that produced the highest profit is `r colnames(profits[maxIndex])[1]`. The profit made from the technical indicator using the predicted trade data is `r max(profits)- cashInHand`.
+
+```{r 16.1 Comparison Continued, echo=FALSE, eval=TRUE}
+plot(smaTrade$priceInhand,type ='l',col='red',xlab='nth Trading Day', 
+     ylab = 'Cash in Hand',
+     main='Comparison of Trade execution Signals')
+lines(rsiTrade$priceInhand, col= 'blue')
+lines(macdTrade$priceInhand,col ='green')
+legend(0, 11000, legend=c('SMA', 'RSI', 'MACD'), col=c('red', 'blue', 'green'),lty=1:3, cex=0.6)
+```
+The line plot above explains the variation of signals of the holding position for each technical indicator. SMA is represented using red line, RSI with blue and MACD with green line. 
+
+# Backtesting
+
+In back testing the signals obtained from each technical indicator is used to execute the trades for the actual data and the profit at the end is compared with the profit obtained from predicted data.
+
+```{r 17. Back Testing Data, include=FALSE}
+backtestingData <- get(getSymbols(stock, src="yahoo", from=toDate, freq="daily", 
+                                  to=predictionDate[predictionWindow]+1))
+```
+
+
+To carry out back testing, getSymbols is used to retrieve the actual trade data in the range of the predicted data and the signals from each technical trading rules are applied to the actual data. A comparison of the profits are then made to identify the percentage error of the predicted profits to the actual profits.
+
+```{r 18. Back testing get profit, include=FALSE}
+getProfit <- function(data){
+  for (i in 1:nrow(data)){
+    if (data$signal[i] == 1){
+      if (is.na(data$Open[i+1])){
+        data$priceInhand[i:nrow(data)] <- data$priceInhand[i]
+      }
+      else{
+        stocksBought <- data$priceInhand[i]%/%data$Open[i+1]
+        data$priceInhand[i:nrow(data)] <- cashInHand%%data$Open[i+1]
+      }
+    }
+    else if(data$signal[i]==-1){
+      if (is.na(data$Open[i+1])){
+        data$priceInhand[i:nrow(data)] <- data$priceInhand[i]
+      }
+      else{
+        data$priceInhand[i:nrow(data)] <- data$priceInhand[i]+(stocksBought * data$Open[i+1])
+      }
+    }
+    else{
+      data$priceInhand[i:nrow(data)] <- data$priceInhand[i]
+    }
+  }
+  return(data)
+}
+
+```
+
+
+```{r 19. Back testing SMA, include=FALSE}
+#Backtesting sma
+smaProfit <- smaTradeRule(smaParameters[1],smaParameters[2])
+backtestSMA <- data.frame(smaTrade$signal,backtestingData$NFLX.Close,
+                          backtestingData$NFLX.Open)
+colnames(backtestSMA) <- c("signal", "Close", "Open")
+backtestSMA$priceInhand <- cashInHand
+stocksBought <- 0
+backtestSMATrade <- getProfit(backtestSMA)
+error_sma <- ((tail(backtestSMATrade$priceInhand,1) - smaProfit)/tail(backtestSMATrade$priceInhand,1))*100
+
+```
+
+## Backtesting On SMA Signals
+
+The signal obtained from the executing the SMA trade is used for actual data and the profit is calculated. The plot below shows the difference between expected and actual profits with the signal generated.
+
+```{r 20. Backtesting SMA plot, eval=TRUE, echo=FALSE, fig.width=6,fig.height=5, fig.asp=0.618, out.width="50%", fig.align="default"}
+barplot(c(smaProfit, tail(backtestSMATrade$priceInhand,1))- cashInHand, col=coul, 
+        xlab = 'Strategy',
+        names.arg = c('SMA', 'Backtesting'),
+        cex.names = 1,
+        ylab = 'Profit',
+        main = 'Expected Vs Actual - SMA')
+```
+
+## Backtesting On RSI Signals
+
+The signal obtained from the executing the RSI trade is used for actual data and the profit is calculated. The plot below shows the difference between expected and actual profits with the signal generated.
+
+
+```{r 21. Back testing RSI, include=FALSE}
+#Backtesting rsi
+rsiProfit <- rsiTradeRule(rsiParameters[1],rsiParameters[2],rsiParameters[3])
+backtestRSI <- data.frame(rsiTrade$signal,backtestingData$NFLX.Close,
+                          backtestingData$NFLX.Open)
+colnames(backtestRSI) <- c("signal", "Close", "Open")
+backtestRSI$priceInhand <- cashInHand
+stocksBought <- 0
+backtestRSITrade <- getProfit(backtestRSI)
+error_rsi <- ((tail(backtestRSITrade$priceInhand,1) - rsiProfit)/tail(backtestRSITrade$priceInhand,1))*100
+```
+
+```{r 22. Backtesting RSI plot, eval=TRUE, echo=FALSE, fig.width=6,fig.height=5, fig.asp=0.618, out.width="50%", fig.align="default"}
+barplot(c(rsiProfit, tail(backtestRSITrade$priceInhand,1))- cashInHand, col=coul, 
+        xlab = 'Strategy',
+        names.arg = c('RSI', 'Backtesting'),
+        cex.names = 1,
+        ylab = 'Profit',
+        main = 'Expected Vs Actual - RSI')
+
+```
+
+## Backtesting On MACD Signals
+
+The signal obtained from the executing the MACD trade is used for actual data and the profit is calculated. The plot below shows the difference between expected and actual profits with the signal generated.
+
+```{r 23. Back testing get profit, include=FALSE}
+macdProfit <- macdTradeRule(macdParameters[1], macdParameters[2], macdParameters[3])
+backtestMACD <- data.frame(macdTrade$signal,backtestingData$NFLX.Close,
+                           backtestingData$NFLX.Open)
+colnames(backtestMACD) <- c("signal", "Close", "Open")
+backtestMACD$priceInhand <- cashInHand
+stocksBought <- 0
+backtestMACDTrade <- getProfit(backtestMACD)
+error_macd <- ((tail(backtestMACDTrade$priceInhand,1) - macdProfit)/tail(backtestMACDTrade$priceInhand,1))*100
+
+```
+
+```{r 24. Backtesting MACD plot, eval=TRUE, echo=FALSE, fig.width=6,fig.height=5, fig.asp=0.618, out.width="50%", fig.align="default"}
+barplot(c(macdProfit, tail(backtestMACDTrade$priceInhand,1))- cashInHand, col=coul, 
+        xlab = 'Strategy',
+        names.arg = c('MACD', 'Backtesting'),
+        cex.names = 1,
+        ylab = 'Profit',
+        main = 'Expected Vs Actual - MACD')
+
+```
+
+# Error Analysis
+
+```{r 25. Back testing get profit, eval=TRUE, echo=FALSE}
+profitDifference <- data.frame(error_sma, error_rsi, error_macd)
+colnames(profitDifference) <- c('SMA', 'RSI', 'MACD')
+barplot(c(abs(t(profitDifference[1,]))), col=coul,
+        names.arg = colnames(profitDifference),
+        xlab = 'Stratergies',
+        cex.names = 1,
+        ylab = '% Error',
+        main = '% Error Comparison')
+minIndex <- which.min(abs(profitDifference[1,]))
+```
+
+Barplot indicates that the technical trading indicator that has least percentage error, therefore being more accurate is `r colnames(profitDifference[minIndex])[1]`.
+
+```{r 26. Plot Error in prediction, eval=TRUE,echo=FALSE}
+predition_errors <- data.frame(predictions$Open,predictions$Close,
+                               backtestingData$NFLX.Open, backtestingData$NFLX.Close)
+for (i in 1: nrow(predition_errors)){
+  predition_errors$openError[i] <- ((backtestingData$NFLX.Open[i]-predictions$Open[i])/backtestingData$NFLX.Open[i])*100
+  predition_errors$closeError[i] <- ((backtestingData$NFLX.Close[i]-predictions$Close[i])/backtestingData$NFLX.Close[i])*100
+}
+plot(abs(predition_errors$openError),col='red',type='l', 
+     main='Percentage Error of Predicted and Actual Opening and Closing Price',
+     ylab= '% Error', xlab= 'nth trade day')
+lines(abs(predition_errors$closeError), col='blue')
+legend(0, 10, legend=c('Open', 'Close'), col=c('red', 'blue'),lty=1:2, cex=0.6)
+
+avg_predition_error_open <- sum(predition_errors$openError)/nrow(predition_errors)
+avg_predition_error_close <- sum(predition_errors$closeError)/nrow(predition_errors)
+```
+To identify how accurate the GrammaticalEvolution was at predicting the future nth trade, the percentage error of the predicted closing and opening price was calculated from the actual real historical data. These errors are plotted in a line graph which indicates that the errors increase after the 5th day. This means that the longer predictions will result in less accurate trades.
+
+The average Error in Opening price prediction is `r avg_predition_error_open`.
+
+The average Error in Closing price prediction is `r avg_predition_error_close`.
+
